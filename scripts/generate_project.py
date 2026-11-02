@@ -16,8 +16,8 @@ def obj(key, value): objects[uid(key)] = value; return uid(key)
 def arr(values): return '(' + ', '.join(values) + ',)'
 def quote(s): return '"' + s + '"'
 products=[]; targets=[]; groups=[]
-shared=['Shared/FocusSession.swift','Shared/SessionStore.swift','Shared/FocusAttributes.swift']
-configs = [('Fokus','com.apple.product-type.application','app',['Fokus/FokusApp.swift','Fokus/FocusController.swift','Fokus/FocusView.swift']+shared),('FocusLiveActivity','com.apple.product-type.app-extension','appex',['LiveActivity/FocusWidget.swift',shared[2]])]
+shared=['Shared/FocusSession.swift','Shared/ScreenTimeStore.swift','Shared/FocusAttributes.swift']
+configs = [('Fokus','com.apple.product-type.application','app',['Fokus/FokusApp.swift','Fokus/FocusController.swift','Fokus/FocusView.swift']+shared),('FocusMonitor','com.apple.product-type.app-extension','appex',['Monitor/FocusMonitor.swift']+shared[:2]),('FocusLiveActivity','com.apple.product-type.app-extension','appex',['LiveActivity/FocusWidget.swift',shared[2]])]
 for name,typ,ext,files in configs:
     folder={'Fokus':'Fokus','FocusMonitor':'Monitor','FocusLiveActivity':'LiveActivity'}[name]
     info={'CFBundleDisplayName':'Fokus','CFBundleIdentifier':'$(PRODUCT_BUNDLE_IDENTIFIER)','CFBundleExecutable':'$(EXECUTABLE_NAME)','CFBundleName':'$(PRODUCT_NAME)','CFBundlePackageType':'APPL' if ext=='app' else 'XPC!','CFBundleShortVersionString':'1.0','CFBundleVersion':'1'}
@@ -26,7 +26,8 @@ for name,typ,ext,files in configs:
         info['NSExtension']={'NSExtensionPointIdentifier':'com.apple.deviceactivity.monitor-extension' if name=='FocusMonitor' else 'com.apple.widgetkit-extension'}
         if name=='FocusMonitor': info['NSExtension']['NSExtensionPrincipalClass']='$(PRODUCT_MODULE_NAME).FocusMonitor'
     (root/folder/'Info.plist').write_bytes(plistlib.dumps(info))
-    ent={}
+    ent={'com.apple.security.application-groups':['group.de.fokuslern.app']}
+    if name!='FocusLiveActivity': ent['com.apple.developer.family-controls']=True
     (root/folder/f'{name}.entitlements').write_bytes(plistlib.dumps(ent))
     refs=[]; builds=[]
     for f in files:
@@ -57,7 +58,7 @@ for name,typ,ext,files in configs:
         asset_build=obj('assetsbuild', f'isa = PBXBuildFile; fileRef = {assets};')
         phases.append(obj('resources', f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ({asset_build},); runOnlyForDeploymentPostprocessing = 0;'))
         embed=[]
-        for child in ['FocusLiveActivity']:
+        for child in ['FocusMonitor','FocusLiveActivity']:
             embed.append(obj('embed'+child,f'isa = PBXBuildFile; fileRef = {uid(child+"product")}; settings = {{ATTRIBUTES = (RemoveHeadersOnCopy,);}};'))
             proxy=obj('proxy'+child,f'isa = PBXContainerItemProxy; containerPortal = {uid("project")}; proxyType = 1; remoteGlobalIDString = {uid(child+"target")}; remoteInfo = {child};')
             deps.append(obj('dep'+child,f'isa = PBXTargetDependency; target = {uid(child+"target")}; targetProxy = {proxy};'))

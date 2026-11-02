@@ -1,14 +1,14 @@
 import SwiftUI
+import FamilyControls
 
 private let mint = Color(red: 0.72, green: 0.94, blue: 0.67)
 
 struct FocusView: View {
     @Bindable var controller: FocusController
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.openURL) private var openURL
     @State private var selected = FocusPreset.defaults[0]
-    @AppStorage("useSystemFocusShortcut") private var useSystemFocus = false
-    @State private var focusHelp = false
+    @State private var blocking = true
+    @State private var picker = false
     @State private var editor = false
     @State private var confirmEnd = false
     var body: some View {
@@ -44,25 +44,21 @@ struct FocusView: View {
                             }.buttonStyle(.plain)
                         }
                         VStack(alignment: .leading, spacing: 18) {
-                            Toggle(isOn: $useSystemFocus) { Label("iPhone-Fokus einschalten", systemImage: "moon.fill") }.tint(mint)
-                            Text("Über deinen Kurzbefehl „Lernfokus“. Er schaltet Mitteilungen bis zum Ende der Lernzeit stumm. Apps bleiben zugänglich.").font(.caption).foregroundStyle(.secondary)
-                            Button("Einmalige Einrichtung anzeigen") { focusHelp = true }
+                            Toggle(isOn: $blocking) { Label("Ablenkungen sperren", systemImage: "lock.shield") }.tint(mint)
+                            if blocking {
+                                Button {
+                                    Task {
+                                        if !controller.authorized { await controller.authorize() }
+                                        if controller.authorized { picker = true }
+                                    }
+                                } label: {
+                                    HStack { Text(controller.hasSelection ? "App-Auswahl bearbeiten" : "Apps auswählen"); Spacer(); Image(systemName: "chevron.right") }
+                                }
+                                Text("Wähle die Apps, Kategorien und Websites, die während deiner Lernzeit gesperrt sind. In der Pause sind sie wieder frei.").font(.caption).foregroundStyle(.secondary)
+                            }
                         }.padding(20).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 20))
                         Button { Task {
-                            await controller.start(selected)
-                            if useSystemFocus, let session = controller.session {
-                                var components = URLComponents(string: "shortcuts://run-shortcut")!
-                                components.queryItems = [
-                                    URLQueryItem(name: "name", value: "Lernfokus"),
-                                    URLQueryItem(name: "input", value: "text"),
-                                    URLQueryItem(name: "text", value: session.focusEnd.ISO8601Format())
-                                ]
-                                if let url = components.url {
-                                    openURL(url) { accepted in
-                                        if !accepted { controller.message = "Dein Timer läuft. Kurzbefehle konnte nicht geöffnet werden. Prüfe, ob die Kurzbefehle-App installiert ist." }
-                                    }
-                                }
-                            }
+                            await controller.start(selected, blocking: blocking)
                         } } label: {
                             Label("Fokus starten", systemImage: "play.fill").frame(maxWidth: .infinity).padding(12)
                         }.buttonStyle(.borderedProminent).tint(mint).foregroundStyle(.black).disabled(controller.busy)
@@ -72,10 +68,11 @@ struct FocusView: View {
             }.background(Color(red: 0.055, green: 0.075, blue: 0.065))
                 .toolbar(.hidden, for: .navigationBar)
         }.tint(mint)
+            .familyActivityPicker(isPresented: $picker, selection: $controller.selection)
+            .onChange(of: picker) { _, open in if !open { controller.saveSelection() } }
             .sheet(isPresented: $editor) { PresetEditor(controller: controller) }
-            .sheet(isPresented: $focusHelp) { SystemFocusHelp() }
             .alert("Hinweis", isPresented: Binding(get: { controller.message != nil }, set: { if !$0 { controller.message = nil } })) { Button("OK") { controller.message = nil } } message: { Text(controller.message ?? "") }
-            .confirmationDialog("Timer vorzeitig beenden? Einen über Kurzbefehle aktivierten iPhone-Fokus beendest du separat im Kontrollzentrum.", isPresented: $confirmEnd, titleVisibility: .visible) { Button("Timer beenden", role: .destructive) { Task { await controller.finish() } } }
+            .confirmationDialog("Fokus vorzeitig beenden? Deine Apps werden wieder freigegeben.", isPresented: $confirmEnd, titleVisibility: .visible) { Button("Fokus beenden", role: .destructive) { Task { await controller.finish() } } }
             .onChange(of: scenePhase) { _, phase in if phase == .active { controller.refresh() } }
             .task {
                 if let first = controller.presets.first { selected = first }
@@ -105,36 +102,12 @@ struct FocusView: View {
                 Text(session.name).foregroundStyle(.secondary)
                 Text(timerInterval: min(context.date, target)...target, countsDown: true)
                     .font(.system(size: 66, weight: .light, design: .rounded)).monospacedDigit()
-                Text(rest ? "Genieße deine Pause." : "Zeit zum Lernen. Dein Timer läuft.")
+                Text(rest ? "Deine Apps sind frei. Genieße deine Pause." : session.blocksApps ? "Deine ausgewählten Apps sind gesperrt." : "Dein Timer läuft ohne App-Sperre.")
                     .multilineTextAlignment(.center).foregroundStyle(.secondary)
                 Label("Auch auf deinem Sperrbildschirm", systemImage: "iphone.gen3").font(.caption)
                 Button("Vorzeitig beenden", role: .destructive) { confirmEnd = true }.padding(.top, 24)
             }.frame(maxWidth: .infinity).padding(.vertical, 50)
         }
-    }
-}
-
-struct SystemFocusHelp: View {
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("Einmal auf deinem iPhone einrichten") {
-                    Text("1. Lege unter Einstellungen → Fokus einen Fokus „Lernen“ an und wähle, welche Mitteilungen erlaubt sind. Alternativ kannst du „Nicht stören“ verwenden.")
-                    Text("2. Erstelle in Apples Kurzbefehle-App einen Kurzbefehl mit dem Namen „Lernfokus“.")
-                    Text("3. Füge die Aktion „Datumsangaben aus Eingabe abrufen“ hinzu. Verwende als Eingabe die Variable „Kurzbefehlseingabe“. Die App übergibt hier das Ende deiner Lernzeit.")
-                    Text("4. Füge „Fokus festlegen“ hinzu: deinen Fokus einschalten, bis „Zeit“. Wähle als Zeit das Datum aus der vorherigen Aktion.")
-                    Text("5. Kehre zur App zurück und aktiviere „iPhone-Fokus einschalten“. Beim Timerstart öffnet sich Kurzbefehle und führt „Lernfokus“ aus. Bestätige beim ersten Mal gegebenenfalls den Zugriff.")
-                }
-                Section("Während deiner Lernzeit") {
-                    Text("Der iPhone-Fokus wird von deinem Kurzbefehl gesteuert. Die App kann nicht prüfen, ob er erfolgreich aktiviert wurde. Teste die Einrichtung einmal mit einem Timer.")
-                    Text("Der Fokus endet zur übergebenen Zeit, auch wenn du die App verlässt. Bei vorzeitigem Timer-Abbruch schaltest du ihn im Kontrollzentrum selbst aus.")
-                    Text("Ein iPhone-Fokus filtert Mitteilungen und kann Home-Bildschirme ausblenden. Er sperrt keine Apps. Bildschirmzeit ist für diesen Timer nicht erforderlich.")
-                }
-                Link("Kurzbefehle öffnen", destination: URL(string: "shortcuts://")!)
-            }.navigationTitle("iPhone-Fokus")
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Fertig") { dismiss() } } }
-        }.tint(mint)
     }
 }
 

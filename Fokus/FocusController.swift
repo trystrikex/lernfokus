@@ -1,10 +1,13 @@
 import SwiftUI
+import FamilyControls
+import DeviceActivity
 import ActivityKit
 import UserNotifications
 
 @MainActor @Observable
 final class FocusController {
-    var session = SessionStore.session
+    var session = ScreenTimeStore.session
+    var selection = ScreenTimeStore.selection
     var presets: [FocusPreset] = {
         guard let data = UserDefaults.standard.data(forKey: "presets"),
               let values = try? JSONDecoder().decode([FocusPreset].self, from: data) else { return FocusPreset.defaults }
@@ -12,26 +15,53 @@ final class FocusController {
     }()
     var message: String?
     var busy = false
+    var authorized: Bool { AuthorizationCenter.shared.authorizationStatus == .approved }
+    var hasSelection: Bool { !selection.applicationTokens.isEmpty || !selection.categoryTokens.isEmpty || !selection.webDomainTokens.isEmpty }
+    func authorize() async {
+        do { try await AuthorizationCenter.shared.requestAuthorization(for: .individual) }
+        catch { message = "Bildschirmzeit konnte nicht aktiviert werden: \(error.localizedDescription)" }
+    }
+    func saveSelection() { ScreenTimeStore.selection = selection }
     func add(_ preset: FocusPreset) {
         presets.append(preset)
         UserDefaults.standard.set(try? JSONEncoder().encode(presets), forKey: "presets")
     }
     func refresh() {
-        session = SessionStore.session
+        ScreenTimeStore.reconcile()
+        session = ScreenTimeStore.session
         if let session, session.phase(at: .now) == .finished {
             Task { await finish() }
         }
     }
-    func start(_ preset: FocusPreset) async {
+    func start(_ preset: FocusPreset, blocking: Bool) async {
         guard !busy, session == nil else { return }
+        guard !blocking || (authorized && hasSelection) else {
+            message = "Aktiviere Bildschirmzeit und wähle zuerst die Apps aus, die du sperren möchtest."
+            return
+        }
         busy = true
         defer { busy = false }
         let now = Date.now
         let focusEnd = now.addingTimeInterval(Double(preset.minutes * 60))
         let newSession = FocusSession(name: preset.name, start: now, focusEnd: focusEnd,
-                                      end: focusEnd.addingTimeInterval(Double(preset.breakMinutes * 60)), blocksApps: false)
-        SessionStore.session = newSession
+                                      end: focusEnd.addingTimeInterval(Double(preset.breakMinutes * 60)), blocksApps: blocking)
+        ScreenTimeStore.session = newSession
+        ScreenTimeStore.selection = selection
+        if blocking {
+            let components: Set<Calendar.Component> = [.year, .month, .day, .hour, .minute, .second]
+            let schedule = DeviceActivitySchedule(
+                intervalStart: Calendar.current.dateComponents(components, from: now),
+                intervalEnd: Calendar.current.dateComponents(components, from: focusEnd), repeats: false)
+            do { try DeviceActivityCenter().startMonitoring(.init(newSession.id.uuidString), during: schedule) }
+            catch {
+                ScreenTimeStore.session = nil
+                ScreenTimeStore.reconcile()
+                message = "Die App-Sperre konnte nicht gestartet werden: \(error.localizedDescription)"
+                return
+            }
+        }
         session = newSession
+        ScreenTimeStore.reconcile()
         if ActivityAuthorizationInfo().areActivitiesEnabled {
             do {
                 for old in Activity<FocusAttributes>.activities { await old.end(nil, dismissalPolicy: .immediate) }
@@ -46,8 +76,11 @@ final class FocusController {
         guard !busy else { return }
         busy = true
         defer { busy = false }
+        let old = session
         session = nil
-        SessionStore.session = nil
+        ScreenTimeStore.session = nil
+        ScreenTimeStore.reconcile()
+        if let old, old.blocksApps { DeviceActivityCenter().stopMonitoring([.init(old.id.uuidString)]) }
         UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
         for activity in Activity<FocusAttributes>.activities { await activity.end(nil, dismissalPolicy: .immediate) }
     }
